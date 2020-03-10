@@ -150,6 +150,9 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(dir=tmp_base_dir) as tmp_dir:
         # consumer isn't thread safe, do not reuse
         consumer = KafkaConsumer(bootstrap_servers=args.brokers)
+        # Force fetch of metadata. This is required to make the
+        # partitions_for_topic-call return anything.
+        consumer.topics()
         partitions = consumer.partitions_for_topic(args.topic)
         consumer.close()
 
