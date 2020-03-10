@@ -153,7 +153,12 @@ if __name__ == "__main__":
         partitions = consumer.partitions_for_topic(args.topic)
         consumer.close()
 
-        print(f"detected {len(partitions)} partitions")
+        if partitions is None:
+            # partitions_for_topic(..) returns None if topic wasn't foudn
+            print(f"topic {args.topic} not found")
+            exit(1)
+        else:
+            print(f"detected {len(partitions)} partitions")
 
         # spawn consumer process for each partition
         processes = []
