@@ -153,6 +153,8 @@ if __name__ == "__main__":
         partitions = consumer.partitions_for_topic(args.topic)
         consumer.close()
 
+        print(f"detected {len(partitions)} partitions")
+
         # spawn consumer process for each partition
         processes = []
         for partition in partitions:
