@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,9 @@ import tempfile
 
 from_to_file_regex = re.compile(r'(?P<from>\d+)-(?P<to>\d+)\.jsonl\.xz') # TODO: Don't hardcode suffix here
 
+# raised when the worker process is asked to terminate
+class InterruptedException(Exception):
+    pass
 
 def parse_args():
     argparser = argparse.ArgumentParser(description='Dump Kafka records into files.')
@@ -79,6 +83,13 @@ def get_next_offset(partition_dir):
 
 def run(topic, partition, tmp_dir):
     msg_prefix = f"{topic}/{partition}: "
+
+    def sigterm_handler(signum, frame):
+        print(f"{msg_prefix}got signal {signum}")
+        raise InterruptedException(f"{msg_prefix}got signal {signum}")
+
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
     # path to store partition data to
     partition_dir = os.path.join(args.data_dir, str(topic), str(partition))
     pathlib.Path(partition_dir).mkdir(parents=True, exist_ok=True)
@@ -135,6 +146,10 @@ def run(topic, partition, tmp_dir):
                 print(f"{msg_prefix}no new records")
                 os.unlink(temporary_fname)
 
+        except InterruptedException as e:
+            # Parent process will handle cleanup
+            break
+
         except Exception as e:
             print(e)
 
@@ -165,6 +180,14 @@ if __name__ == "__main__":
 
         # spawn consumer process for each partition
         processes = []
+
+        def sigterm_handler(signum, frame):
+            print(f"got signal {signum}: Terminating children..")
+            for process in processes:
+                process.terminate()
+
+        signal.signal(signal.SIGTERM, sigterm_handler)
+
         for partition in partitions:
             p = Process(target=run, args=(args.topic, partition, tmp_dir))
             processes.append(p)
