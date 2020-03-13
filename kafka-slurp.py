@@ -2,18 +2,22 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from kafka import KafkaConsumer, TopicPartition
-from multiprocessing import Process
+from datetime import datetime, timezone
 import argparse
 import base64
 import glob
 import json
+import multiprocessing
 import os
 import pathlib
+import queue
 import re
 import signal
 import subprocess
 import sys
 import tempfile
+import time
+import threading
 
 
 # This tool dumps data from kafka topics to files in a directory structure like
@@ -34,6 +38,14 @@ def parse_args():
     argparser.add_argument('--record-limit', type=int, help='Maximum number of records pr file', default=10000)
     argparser.add_argument('--read-timeout', type=int, help='Maximum duration (in minutes) to read data before starting a new file', default=10)
     return argparser.parse_args()
+
+
+def log(**attrs):
+    meta = dict(
+        timestamp=datetime.now(timezone.utc).astimezone().isoformat('T')
+    )
+    print(json.dumps(dict(**meta, **attrs)), flush = True)
+
 
 # Serialize a record as JSON, containing the topic, partition and offset as-is,
 # while base64 encoding the key and value, since they can contain arbitrary bytes.
@@ -81,12 +93,13 @@ def get_next_offset(partition_dir):
 # occasionally, instead of waiting a potentially very long time for
 # args.record_limit records to show up.
 
-def run(topic, partition, tmp_dir):
-    msg_prefix = f"{topic}/{partition}: "
+def run(log_queue, topic, partition, tmp_dir):
+    def logev(**attrs):
+        log_queue.put(dict(topic=topic, partition=partition, **attrs))
+
 
     def sigterm_handler(signum, frame):
-        print(f"{msg_prefix}got signal {signum}")
-        raise InterruptedException(f"{msg_prefix}got signal {signum}")
+        raise InterruptedException(f"got signal {signum}")
 
     signal.signal(signal.SIGTERM, sigterm_handler)
 
@@ -103,10 +116,10 @@ def run(topic, partition, tmp_dir):
 
         # Start from the beginning if None was return instead of an actual offset
         if from_offset == None:
-            print(f"{msg_prefix}starting from beginning, bucket_size={args.record_limit}")
+            logev(message=f"starting from beginning, bucket_size={args.record_limit}", state="starting", bucket_size=args.record_limit)
             consumer.seek_to_beginning(TopicPartition(topic, partition))
         else:
-            print(f"{topic}/{partition}: resuming from {from_offset}, bucket_size={args.record_limit}")
+            logev(message=f"resuming from {from_offset}, bucket_size={args.record_limit}", state="resuming", bucket_size=args.record_limit)
             consumer.seek(TopicPartition(topic, partition), from_offset)
 
         try:
@@ -131,27 +144,28 @@ def run(topic, partition, tmp_dir):
             if records_read > 0:
                 # do the actual compressing/moving of data dance
                 suffix = ".xz"
-                print(f"{msg_prefix}compressing {temporary_fname}")
+                logev(message=f"compressing {temporary_fname}")
                 # xz without the flag `-k` will delete the original file
                 subprocess.run(["xz", "-3", "--suffix", suffix, temporary_fname], capture_output=True, check=True)
 
                 target_file = os.path.join(partition_dir, f"{from_offset}-{last_offset}.jsonl{suffix}")
 
-                print(f"{msg_prefix}moving {temporary_fname}{suffix} to {target_file}")
+                logev(message=f"moving {temporary_fname}{suffix} to {target_file}")
                 # Do our best to ensure an atomic move -- this should also fail if renaming
                 # across filesystems
                 os.rename(f"{temporary_fname}{suffix}", target_file)
             else:
                 # No new records were read -> perform cleanup
-                print(f"{msg_prefix}no new records")
+                logev(message=f"no new records")
                 os.unlink(temporary_fname)
 
         except InterruptedException as e:
+            logev(message="interrupted", state="interrupted")
             # Parent process will handle cleanup
             break
 
         except Exception as e:
-            print(e)
+            pass
 
 
 if __name__ == "__main__":
@@ -173,25 +187,45 @@ if __name__ == "__main__":
 
         if partitions is None:
             # partitions_for_topic(..) returns None if topic wasn't foudn
-            print(f"topic {args.topic} not found")
+            log(message=f"topic {args.topic} not found", thread="main")
             exit(1)
         else:
-            print(f"detected {len(partitions)} partitions")
+            log(message=f"detected {len(partitions)} partitions", thread="main")
 
         # spawn consumer process for each partition
         processes = []
+        log_queue = multiprocessing.Queue(maxsize=0) # maxsize <= 0 -> unlimited queue size
+
+        log_stop_event = threading.Event()
+
 
         def sigterm_handler(signum, frame):
-            print(f"got signal {signum}: Terminating children..")
+            log(message=f"got signal {signum}: Terminating children..", thread="main")
             for process in processes:
                 process.terminate()
 
+            log_stop_event.set()
+
         signal.signal(signal.SIGTERM, sigterm_handler)
+        signal.signal(signal.SIGINT, sigterm_handler)
 
         for partition in partitions:
-            p = Process(target=run, args=(args.topic, partition, tmp_dir))
+            p = multiprocessing.Process(target=run, args=(log_queue, args.topic, partition, tmp_dir), name=f"partition {partition}")
             processes.append(p)
             p.start()
 
+        # this boolean expression might be iffy:
+        # - run the loop until the stop_even is set, but allow the queue to empty before stopping
+        while (not log_queue.empty) or (not log_stop_event.is_set()):
+            try:
+                e = log_queue.get(timeout=1)
+                log(**e)
+            except queue.Empty:
+                pass
+
         # wait for all processes to complete
-        for p in processes: p.join()
+        for p in processes:
+            p.join()
+            log(message=f"Worker \"{p.name}\" completed", thread="main")
+
+        log(message=f"All workers completed", thread="main")
