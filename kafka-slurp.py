@@ -42,9 +42,35 @@ def parse_args():
 
 def log(**attrs):
     meta = dict(
-        timestamp=datetime.now(timezone.utc).astimezone().isoformat('T')
+        timestamp = datetime.now(timezone.utc).astimezone().isoformat('T'),
+        app = 'kafka-slurp'
     )
     print(json.dumps(dict(**meta, **attrs)), flush = True)
+
+
+def log_duration(sli = None, **attrs):
+    def decorator_log_duration(func):
+        def decorated(*args, **kwargs):
+            nonlocal sli
+
+            t_start = datetime.now()
+            result = func(*args, **kwargs)
+            t_end = datetime.now()
+
+            if sli is None: sli = func.__name__
+
+            log(**dict(
+                sli = sli,
+                durationSec = (t_end - t_start).total_seconds(),
+                **attrs
+            ))
+
+            return result
+
+        return decorated
+    return decorator_log_duration
+
+
 
 
 # Serialize a record as JSON, containing the topic, partition and offset as-is,
@@ -69,6 +95,7 @@ def serialize_record(consumerRecord):
 # stored in the partition_dir. Files are named "fromOffset-toOffset.${ext}".
 # Returning None indicates that the consumer should start from the beginning
 # instead of from an offset.
+@log_duration()
 def get_next_offset(partition_dir):
     existing_snapshots = glob.glob(os.path.join(partition_dir, "*.jsonl.xz"))
     basenames = map(os.path.basename, existing_snapshots)
@@ -92,6 +119,40 @@ def get_next_offset(partition_dir):
 # low, but by limiting the time window data is read, data will still be stored
 # occasionally, instead of waiting a potentially very long time for
 # args.record_limit records to show up.
+@log_duration()
+def compress(fname, suffix):
+    # xz without the flag `-k` will delete the original file
+    subprocess.run(["xz", "-3", "--suffix", suffix, fname], capture_output=True, check=True)
+
+
+@log_duration()
+def move_into_place(source, dest):
+    # Do our best to ensure an atomic move -- this should also fail if renaming
+    # across filesystems
+    os.rename(source, dest)
+
+@log_duration()
+def load_segment(tmp_dir, consumer, record_limit, from_offset):
+    # Data is first written to a temporary file, then compressed, and
+    # lastly moved to its final destination
+    (fd, temporary_fname) = tempfile.mkstemp(dir=tmp_dir)
+    last_offset = None
+    records_read = 0
+    with open(fd, 'w') as f:
+        for msg in consumer:
+            if records_read >= args.record_limit: break
+            x = serialize_record(msg)
+            f.write(x + '\n')
+            records_read += 1
+
+            # When snapshotting data for the first time, the first offset isn't know, so we use the offset from the first record we see
+            if from_offset is None:
+                from_offset = msg.offset
+
+            last_offset = msg.offset
+
+    return (records_read, from_offset, last_offset, temporary_fname)
+
 
 def run(log_queue, topic, partition, tmp_dir):
     def logev(**attrs):
@@ -123,37 +184,18 @@ def run(log_queue, topic, partition, tmp_dir):
             consumer.seek(TopicPartition(topic, partition), from_offset)
 
         try:
-            # Data is first written to a temporary file, then compressed, and
-            # lastly moved to its final destination
-            (fd, temporary_fname) = tempfile.mkstemp(dir=tmp_dir)
-            last_offset = None
-            records_read = 0
-            with open(fd, 'w') as f:
-                for msg in consumer:
-                    if records_read >= args.record_limit: break
-                    x = serialize_record(msg)
-                    f.write(x + '\n')
-                    records_read += 1
-
-                    # When snapshotting data for the first time, the first offset isn't know, so we use the offset from the first record we see
-                    if from_offset is None:
-                        from_offset = msg.offset
-
-                    last_offset = msg.offset
+            (records_read, from_offset, last_offset, temporary_fname) = load_segment(tmp_dir, consumer, args.record_limit, from_offset)
 
             if records_read > 0:
                 # do the actual compressing/moving of data dance
                 suffix = ".xz"
                 logev(message=f"compressing {temporary_fname}")
-                # xz without the flag `-k` will delete the original file
-                subprocess.run(["xz", "-3", "--suffix", suffix, temporary_fname], capture_output=True, check=True)
+                compress(temporary_fname, suffix)
 
                 target_file = os.path.join(partition_dir, f"{from_offset}-{last_offset}.jsonl{suffix}")
 
                 logev(message=f"moving {temporary_fname}{suffix} to {target_file}")
-                # Do our best to ensure an atomic move -- this should also fail if renaming
-                # across filesystems
-                os.rename(f"{temporary_fname}{suffix}", target_file)
+                move_into_place(f"{temporary_fname}{suffix}", target_file)
             else:
                 # No new records were read -> perform cleanup
                 logev(message=f"no new records")
