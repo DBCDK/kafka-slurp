@@ -122,7 +122,7 @@ def get_next_offset(partition_dir):
 @log_duration()
 def compress(fname, suffix):
     # xz without the flag `-k` will delete the original file
-    subprocess.run(["xz", "-3", "--suffix", suffix, fname], capture_output=True, check=True)
+    subprocess.run(["xz", "-3", "-T", "1", "--suffix", suffix, fname], capture_output=True, check=True)
 
 
 @log_duration()
