@@ -91,25 +91,42 @@ def serialize_record(consumerRecord):
         })
 
 
-# Find the next offset to consume from, based on the existing slices of data as
+# Find the next segment to consume, based on the existing slices of data as
 # stored in the partition_dir. Files are named "fromOffset-toOffset.${ext}".
-# Returning None indicates that the consumer should start from the beginning
-# instead of from an offset.
+# Returning None indicates that the consumer should start from the beginning.
+# Otherwise (fromOffset, toOffset) will be returned, both offsets to be included
+# in the backup.
 @log_duration()
-def get_next_offset(partition_dir):
+def get_next_segment(logev, partition_dir, record_limit):
     existing_snapshots = glob.glob(os.path.join(partition_dir, "*.jsonl.xz"))
     basenames = map(os.path.basename, existing_snapshots)
     latest = None
     # loop over all files, parsing the filename, and keeping the largets to-offset
-    for b in basenames:
+    for b in sorted(basenames):
+        from_ = int(from_to_file_regex.match(b).group("from"))
         to = int(from_to_file_regex.match(b).group("to"))
+
+        # test for missing segments
+        if latest is not None and from_ > latest+1:
+            # one offset after the previous, until one prior to the next
+            first_missing = latest+1
+            last_missing = from_-1
+            logev(message=f"detected missing segment from {first_missing} to {last_missing}", event="found-missing-segment", start=first_missing, end=last_missing)
+            # avoid creating segments larger than usual, by checking the size of the missing segment,
+            # and return a smaller segment if required.
+            segment_size = last_missing - first_missing + 1 # uh, all the possible off-by-one errors...
+            if segment_size > record_limit:
+                return (first_missing, first_missing+record_limit-1)
+            else:
+                return (first_missing, last_missing)
+
         if latest is None or to > latest:
             latest = to
 
     if latest is None:
         return None
     else:
-        return latest+1
+        return (latest+1, latest+record_limit)
 
 
 # Keep reading data from topic,partition until the end of time. Read chunks of
@@ -132,7 +149,8 @@ def move_into_place(source, dest):
     os.rename(source, dest)
 
 @log_duration()
-def load_segment(tmp_dir, consumer, record_limit, from_offset):
+def load_segment(tmp_dir, consumer, from_offset, to_offset):
+    record_limit = to_offset - from_offset + 1
     # Data is first written to a temporary file, then compressed, and
     # lastly moved to its final destination
     (fd, temporary_fname) = tempfile.mkstemp(dir=tmp_dir)
@@ -140,7 +158,7 @@ def load_segment(tmp_dir, consumer, record_limit, from_offset):
     records_read = 0
     with open(fd, 'w') as f:
         for msg in consumer:
-            if records_read >= args.record_limit: break
+            if records_read >= record_limit: break
             x = serialize_record(msg)
             f.write(x + '\n')
             records_read += 1
@@ -173,18 +191,18 @@ def run(log_queue, topic, partition, tmp_dir):
     consumer.assign([TopicPartition(topic, partition)])
 
     while True:
-        from_offset = get_next_offset(partition_dir)
+        (from_offset, to_offset) = get_next_segment(logev, partition_dir, args.record_limit)
 
         # Start from the beginning if None was return instead of an actual offset
         if from_offset == None:
-            logev(message=f"starting from beginning, bucket_size={args.record_limit}", state="starting", bucket_size=args.record_limit)
+            logev(message=f"starting from beginning, bucket_size={args.record_limit}", state="starting", bucket_size=args.record_limit, start=from_offset, end=to_offset)
             consumer.seek_to_beginning(TopicPartition(topic, partition))
         else:
-            logev(message=f"resuming from {from_offset}, bucket_size={args.record_limit}", state="resuming", bucket_size=args.record_limit)
+            logev(message=f"resuming from {from_offset}, bucket_size={args.record_limit}", state="resuming", bucket_size=args.record_limit, start=from_offset, end=to_offset)
             consumer.seek(TopicPartition(topic, partition), from_offset)
 
         try:
-            (records_read, from_offset, last_offset, temporary_fname) = load_segment(tmp_dir, consumer, args.record_limit, from_offset)
+            (records_read, from_offset, last_offset, temporary_fname) = load_segment(tmp_dir, consumer, from_offset, to_offset)
 
             if records_read > 0:
                 # do the actual compressing/moving of data dance
