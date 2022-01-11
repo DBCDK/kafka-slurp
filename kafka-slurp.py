@@ -124,7 +124,8 @@ def get_next_segment(logev, partition_dir, record_limit):
             latest = to
 
     if latest is None:
-        return None
+        # Return pair of Nones so caller can destructure
+        return (None, None)
     else:
         return (latest+1, latest+record_limit)
 
