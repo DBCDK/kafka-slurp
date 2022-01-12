@@ -150,8 +150,7 @@ def move_into_place(source, dest):
     os.rename(source, dest)
 
 @log_duration()
-def load_segment(tmp_dir, consumer, from_offset, to_offset):
-    record_limit = to_offset - from_offset + 1
+def load_segment(tmp_dir, consumer, from_offset):
     # Data is first written to a temporary file, then compressed, and
     # lastly moved to its final destination
     (fd, temporary_fname) = tempfile.mkstemp(dir=tmp_dir)
@@ -159,7 +158,7 @@ def load_segment(tmp_dir, consumer, from_offset, to_offset):
     records_read = 0
     with open(fd, 'w') as f:
         for msg in consumer:
-            if records_read >= record_limit: break
+            if records_read >= args.record_limit: break
             x = serialize_record(msg)
             f.write(x + '\n')
             records_read += 1
@@ -203,7 +202,7 @@ def run(log_queue, topic, partition, tmp_dir):
             consumer.seek(TopicPartition(topic, partition), from_offset)
 
         try:
-            (records_read, from_offset, last_offset, temporary_fname) = load_segment(tmp_dir, consumer, from_offset, to_offset)
+            (records_read, from_offset, last_offset, temporary_fname) = load_segment(tmp_dir, consumer, from_offset)
 
             if records_read > 0:
                 # do the actual compressing/moving of data dance
