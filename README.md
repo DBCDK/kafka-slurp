@@ -29,3 +29,15 @@ optional arguments:
                         Maximum duration (in minutes) to read data before
                         starting a new file
 ```
+
+
+## Development
+
+Project contains a buildable test to verify basic functionality. 
+Build and run with:
+
+```
+nix-build test.nix -A test
+```
+A successful run reports:
+(finished: waiting for file ‘/root/out/testtopic/0/0-0.jsonl.xz‘, in X.XX seconds)
