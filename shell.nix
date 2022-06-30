@@ -1,4 +1,4 @@
-{ pkgs ? import ./nixpkgs.nix {} }:
+{ pkgs ? import <nixpkgs> {} }:
 pkgs.mkShell {
   name = "kafka-slurp";
   buildInputs = (with pkgs; [
