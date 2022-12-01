@@ -1,1 +1,1 @@
-fetchTarball "https://github.com/NixOS/nixpkgs/archive/e0d71e288bc93e57c05be5df027943f89344107b.tar.gz"
+fetchTarball "https://github.com/NixOS/nixpkgs/archive/596a8e828c5dfa504f91918d0fa4152db3ab5502.tar.gz"
