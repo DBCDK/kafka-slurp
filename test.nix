@@ -30,7 +30,7 @@ let
       slurp.wait_for_unit("apache-kafka.service")
       slurp.wait_until_succeeds(
           "${pkgs.apacheKafka}/bin/kafka-topics.sh --create "
-          + "--zookeeper localhost:2181 --partitions 1 "
+          + "--bootstrap-server localhost:9092 --partitions 1 "
           + "--replication-factor 1 --topic testtopic"
       )
 
