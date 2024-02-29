@@ -1,8 +1,6 @@
-{  nixpkgs ? import ./nixpkgs.nix
-,  pkgs ? import nixpkgs {}
-}:
+{ nixpkgs ? import ./nixpkgs.nix, pkgs ? import nixpkgs { } }:
 let
-  python = pkgs.python3.withPackages(ps: with ps; [kafka-python]);
+  python = pkgs.python3.withPackages (ps: with ps; [ kafka-python ]);
   make-test = import "${nixpkgs}/nixos/tests/make-test-python.nix";
   test = make-test {
     name = "kafka-slurp-test";
@@ -14,12 +12,11 @@ let
         systemd.services.slurp = {
           # --record-limit 1, we only check a single file
           script = ''
-            ${./kafka-slurp.py} --brokers localhost:9092 --topic testtopic --data-dir /root/out --record-limit 1
-         '';
-          path = [
-            pkgs.lzma
-            python
-          ];
+            ${
+              ./kafka-slurp.py
+            } --brokers localhost:9092 --topic testtopic --data-dir /root/out --record-limit 1
+          '';
+          path = [ pkgs.lzma python ];
         };
       };
     };
@@ -37,7 +34,7 @@ let
       slurp.execute(
         "systemctl start slurp"
       )      
-      
+
       # Need two messages or kafka-slurp will spend time resetting onset
       slurp.wait_until_succeeds(
           "echo testmessage1 | ${pkgs.kcat}/bin/kcat -b localhost:9092 -t testtopic"
@@ -51,7 +48,4 @@ let
       )
     '';
   };
-in
-{
-  inherit test;
-}
+in { inherit test; }
