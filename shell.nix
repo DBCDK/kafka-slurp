@@ -3,7 +3,7 @@ pkgs.mkShell {
   name = "kafka-slurp";
   buildInputs = (with pkgs; [
     lzma
-  ]) ++ (with pkgs.python37Packages; [
+  ]) ++ (with pkgs.python3Packages; [
     kafka-python
   ]);
 }
